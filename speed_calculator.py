@@ -1,170 +1,150 @@
-
 import cv2
-import cvzone
-# Install CUDA-enabled OpenCV
-import cv2.cuda
-
-from ultralytics import YOLO
-
+import math
 import numpy as np
 
-video_path = 'video/56310-479197605.mp4'
+from utils.video import process_frame, map_to_homography, farneback_optical_flow_with_gpu
 
-mask_resized = False
-road_mask_gray = cv2.cvtColor(cv2.imread('video/road_mask.png'), cv2.COLOR_BGR2GRAY)
+points = []
 
-detection_mask = cv2.imread('video/detection_mask.png')
-stop_detection_mask = cv2.cvtColor(cv2.imread('video/stop_detection_mask.png'), cv2.COLOR_BGR2GRAY)
+def select_points(event, click_x, click_y, ___, param):
+    global points
+    if event == cv2.EVENT_LBUTTONDOWN:
+        points.append([click_x, click_y])
 
-detection_model = YOLO('detenction/yolov8l.pt')
+        frame = param.copy()
+        for p in points:
+            cv2.circle(frame, (int(p[0]), int(p[1])), 5, (255, 0, 0), -1)
+        cv2.imshow("Select Homographic Points", frame)
 
-def preprocess_frame(video_stream, scale_factor=0.33):
-    is_over, frame = video_stream.read()
-    if not is_over:
-        return None, None
+cap = cv2.VideoCapture('video/56310-479197605.mp4')
+fps = cap.get(cv2.CAP_PROP_FPS)
 
-    '''
-    frame = cv2.resize(src=frame,
-                       dsize=None,
-                       fx=scale_factor,
-                       fy=scale_factor,
-                       interpolation=cv2.INTER_LINEAR)
-    '''
+height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    frame = cv2.GaussianBlur(frame, (5, 5), 0)
+scale = (.5, .5)
+if scale is not None:
+    height *= scale[1]
 
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    frame_gray = cv2.bitwise_and(frame_gray, road_mask_gray)
-    return frame, frame_gray
+total_road_distance_in_m = 5000
+m_per_pixel = total_road_distance_in_m / height
 
+if not cap.isOpened():
+    print("Error opening video stream or file")
+    exit(1)
 
-def detect_cars(frame):
-    detection_frame = cv2.bitwise_and(frame, detection_mask)
-    return detection_model(detection_frame, stream=True)
+first_frame, prev_gray = process_frame(cap, scale)
 
-cars_dict = dict()
+cv2.imshow("Select Homographic Points", first_frame)
+cv2.setMouseCallback("Select Homographic Points", select_points, first_frame)
 
-isOpened = True
-while isOpened:
+all_points_selected = False
+while not all_points_selected:
+    key = cv2.waitKey(1) & 0xFF
+    if key == 13:  # Enter key
+        if len(points) >= 4:
+            all_points_selected = True
+        else:
+            print("At least 4 points are required for homography. Continue selecting.")
 
-    cap = cv2.VideoCapture(video_path)
+cv2.destroyAllWindows()
 
-    if not mask_resized:
-        mask_resized = True
-        # We need the first frame
-        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+height, width = first_frame.shape[:2]
+width = int(width / 2)
+output_points = np.array([
+    [0, 0],          # Top-left
+    [width - 1, 0],  # Top-right
+    [width - 1, height - 1],  # Bottom-right
+    [0, height - 1]  # Bottom-left
+], dtype=np.float32)
 
-        detection_mask = cv2.resize(detection_mask,
-                                    dsize=(width, height),
-                                    interpolation = cv2.INTER_LINEAR)
-        stop_detection_mask = cv2.resize(stop_detection_mask,
-                                         dsize=(width, height),
-                                         interpolation = cv2.INTER_LINEAR)
-        road_mask_gray = cv2.resize(road_mask_gray,
-                                    dsize=(width, height),
-                                    interpolation = cv2.INTER_LINEAR)
+H, status = cv2.findHomography(np.array(points), output_points)
 
 
-    _, prev_frame_gray = preprocess_frame(cap)
-    if prev_frame_gray is None:
-        print("Error reading video file!")
-        exit()
+while cap.isOpened():
+    last_frame, last_frame_gray = process_frame(cap, scale)
+    if last_frame_gray is None:
+        break
 
-    while cap.isOpened():
-        last_frame, last_frame_gray = preprocess_frame(cap)
-        if last_frame is None:
-            break
+    homographic_frame = cv2.warpPerspective(last_frame, H, (width, height))
 
-        # We'll now filter only the cars getting the centroid of the objects
-        detected_cars = detect_cars(last_frame)
-        for det in detected_cars:
-            boxes = det.boxes
 
-            boxes = [box for box in boxes if int(box.cls) == 2]
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    # Compute optical flow using the Lucas-Kanade method
+    flow = farneback_optical_flow_with_gpu(prev_frame=prev_gray,
+                                           frame_gray=last_frame_gray,
+                                           pyr_scale=0.5,
+                                           levels=3,
+                                           win_size=15,
+                                           iterations=5,
+                                           poly_n=5,
+                                           poly_sigma=1.2,
+                                           flags=0)
 
-                w, h = x2 - x1, y2 - y1
+    mag, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
+    median_mag = np.median(mag)
 
-                # Calculating the center of the box
-                center = (int(x1 + w / 2), int(y1 + h / 2))
+    motion_mask = (mag > max(2.5, median_mag * 1.5)).astype(np.uint8)
 
-                ## Extracting box features for tracking
+    # 6. (Optional) Morphological operations to clean up noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
+    motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-                cars_dict.update({
-                    len(cars_dict): {
-                        'center': center,
-                        'box': (center[0] - 5, center[1] - 5, center[0] + 5, center[1] + 5),
-                        'shape': (10, 10)
-                    }
-                })
+    # 7. Find contours of the moving regions
+    contours, _ = cv2.findContours(motion_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-                cv2.circle(last_frame,
-                           center,
-                           radius=3,
-                           color=(255, 0, 0))
-                cv2.rectangle(last_frame,
-                              pt1=(center[0] - 5, center[1] - 5),
-                              pt2=(center[0] + 5, center[1] + 5),
-                              color=(255,0,0))
-                #cvzone.cornerRect(last_frame, (x1, y1, w, h))
+    arrow_frame = last_frame.copy()
 
-        # Calculate optical flow for the keypoints
-        optical_flow = cv2.calcOpticalFlowFarneback(prev_frame_gray,
-                                                    last_frame_gray,
-                                                    None,
-                                                    0.5,
-                                                    3,
-                                                    15,
-                                                    3,
-                                                    5,
-                                                    1.2,
-                                                    0)
+    h, w = flow.shape[:2]
+    for y in range(0, h, 16):
+        for x in range(0, w, 16):
+            fx, fy = flow[y, x]
+            magnitude = np.sqrt(fx**2 + fy**2)
 
-        for car_id, car in cars_dict.items():
-            ## Checking if the box is in the death area
+            # Only draw if magnitude exceeds threshold
+            if magnitude > 2:
+                x_end = int(x + fx)
+                y_end = int(y + fy)
+                cv2.arrowedLine(
+                    arrow_frame,
+                    (x, y),
+                    (x_end, y_end),
+                    (0,255, 0),
+                    thickness=1,
+                    line_type=cv2.LINE_AA,
+                    tipLength=0.3
+                )
 
-            car_x, car_y = car['box'][0], car['box'][1]
-            car_x1, car_y1 = car['box'][2], car['box'][3]
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 700:
+            (x, y, w, h) = cv2.boundingRect(cnt)
 
-            car_w, car_h = car['shape'][0], car['shape'][1]
+            dx, dy = np.mean(flow[y:y+h, x:x+w, 0]), np.mean(flow[y:y+h, x:x+w, 1])
+            prev_x, prex_y = math.ceil(x - dx), math.ceil(y - dy)
 
-            death_area = stop_detection_mask[car_x:car_y, car_x1:car_y1]
-            non_zero_count = cv2.countNonZero(death_area)
-            if non_zero_count > 0:
-                cars_dict.pop(car_id)
-            else:
-                car_flow = optical_flow[car_x:car_y, car_x1:car_y1]
+            prex_x_h, prex_y_h = map_to_homography((prev_x, prex_y), H)
+            x_h, y_h = map_to_homography((x, y), H)
 
-                dx = car_flow[..., 0]  # Horizontal flow
-                dy = car_flow[..., 1]  # Vertical flow
+            magnitude = math.ceil(np.sqrt((x_h - prex_x_h)**2 + (y_h - prex_y_h)**2))
 
-                new_x = int(car_x + np.mean(dx))
-                new_y = int(car_y + np.mean(dy))
+            # We could apply further checks for roundness here
+            # e.g. ratio of bounding box dimensions, or Hough circle detection
+            # But let’s just draw a bounding rect for demonstration
 
-                # Update ROI position based on average flow
-                car['box'] = (new_x, new_y, new_x + car_w, new_y + car_h)
+            speed = int(magnitude * 3.6 * fps)
 
-                cv2.circle(last_frame, (car['box'][0], car['box'][1]), 3, (255, 0, 0))
-                cv2.rectangle(last_frame,
-                              pt1=(car['box'][0], car['box'][1]),
-                              pt2=(car['box'][2], car['box'][3]),
-                              color=(255,0,0))
-                #cvzone.cornerRect(last_frame, (car['box'][0], car['box'][1], car_w, car_h))
+            cv2.putText(last_frame, f'Speed: {speed} KM/H', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.rectangle(last_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        # Display the frame with rectangles
-        cv2.imshow("Car Detection", last_frame)
+    prev_gray = last_frame_gray
 
-        # Update previous frame
-        prev_frame_gray = last_frame_gray
+    cv2.imshow('OpticalFlow', arrow_frame)
+    cv2.imshow('Homographic Plane', homographic_frame)
+    cv2.imshow('Cars Speed', np.hstack([last_frame]))
 
-        # Break on 'q' key press
-        if cv2.waitKey(30) & 0xFF == ord('q'):
-            isOpened = False
-            break
+# Break the loop if 'q' key is pressed
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-    cap.release()
-
+cap.release()
 cv2.destroyAllWindows()
