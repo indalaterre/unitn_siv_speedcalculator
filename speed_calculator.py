@@ -1,8 +1,10 @@
+import time
+
 import cv2
 import math
 import numpy as np
 
-from utils.video import process_frame, map_to_homography, farneback_optical_flow_with_gpu
+from utils.video import process_frame, map_to_homography, is_using_gpu, calculate_farneback_optical_flow, print_car_speed
 
 points = []
 
@@ -25,7 +27,7 @@ scale = (.5, .5)
 if scale is not None:
     height *= scale[1]
 
-total_road_distance_in_m = 5000
+total_road_distance_in_m = 1000
 m_per_pixel = total_road_distance_in_m / height
 
 if not cap.isOpened():
@@ -36,6 +38,12 @@ first_frame, prev_gray = process_frame(cap, scale)
 
 cv2.imshow("Select Homographic Points", first_frame)
 cv2.setMouseCallback("Select Homographic Points", select_points, first_frame)
+
+if is_using_gpu():
+    print('Running Farneback with GPU')
+else:
+    print('Running Farneback with CPU')
+
 
 all_points_selected = False
 while not all_points_selected:
@@ -50,6 +58,7 @@ cv2.destroyAllWindows()
 
 height, width = first_frame.shape[:2]
 width = int(width / 2)
+
 output_points = np.array([
     [0, 0],          # Top-left
     [width - 1, 0],  # Top-right
@@ -59,7 +68,9 @@ output_points = np.array([
 
 H, status = cv2.findHomography(np.array(points), output_points)
 
+centroids_index = dict()
 
+prev_timestamp = time.time()
 while cap.isOpened():
     last_frame, last_frame_gray = process_frame(cap, scale)
     if last_frame_gray is None:
@@ -69,15 +80,15 @@ while cap.isOpened():
 
 
     # Compute optical flow using the Lucas-Kanade method
-    flow = farneback_optical_flow_with_gpu(prev_frame=prev_gray,
-                                           frame_gray=last_frame_gray,
-                                           pyr_scale=0.5,
-                                           levels=3,
-                                           win_size=15,
-                                           iterations=5,
-                                           poly_n=5,
-                                           poly_sigma=1.2,
-                                           flags=0)
+    flow = calculate_farneback_optical_flow(prev_frame=prev_gray,
+                                            frame_gray=last_frame_gray,
+                                            pyr_scale=0.5,
+                                            levels=3,
+                                            win_size=15,
+                                            iterations=5,
+                                            poly_n=5,
+                                            poly_sigma=1.2,
+                                            flags=0)
 
     mag, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
     median_mag = np.median(mag)
@@ -114,16 +125,19 @@ while cap.isOpened():
                     tipLength=0.3
                 )
 
+    current_timestamp = time.time()
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area > 700:
-            (x, y, w, h) = cv2.boundingRect(cnt)
+            bounding_rect = cv2.boundingRect(cnt)
+            (x, y, w, h) = bounding_rect
 
-            dx, dy = np.mean(flow[y:y+h, x:x+w, 0]), np.mean(flow[y:y+h, x:x+w, 1])
-            prev_x, prex_y = math.ceil(x - dx), math.ceil(y - dy)
+            cx, cy = math.ceil(x + w / 2), math.ceil(y + h / 2)
+            dx, dy = flow[cy, cx, 0], np.mean(flow[cy, cx, 1])
+            prev_x, prex_y = math.ceil(abs(cx - dx)), math.ceil(abs(cy - dy))
 
             prex_x_h, prex_y_h = map_to_homography((prev_x, prex_y), H)
-            x_h, y_h = map_to_homography((x, y), H)
+            x_h, y_h = map_to_homography((cx, cy), H)
 
             magnitude = math.ceil(np.sqrt((x_h - prex_x_h)**2 + (y_h - prex_y_h)**2))
 
@@ -131,12 +145,12 @@ while cap.isOpened():
             # e.g. ratio of bounding box dimensions, or Hough circle detection
             # But let’s just draw a bounding rect for demonstration
 
-            speed = int(magnitude * 3.6 * fps)
-
-            cv2.putText(last_frame, f'Speed: {speed} KM/H', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            cv2.rectangle(last_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            speed = int(magnitude * 3.6 / (current_timestamp - prev_timestamp))
+            print_car_speed(last_frame, speed, bounding_rect)
 
     prev_gray = last_frame_gray
+
+    prev_timestamp = current_timestamp
 
     cv2.imshow('OpticalFlow', arrow_frame)
     cv2.imshow('Homographic Plane', homographic_frame)

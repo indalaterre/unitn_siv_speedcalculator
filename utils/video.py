@@ -22,6 +22,69 @@ def map_to_homography(position, h_matrix):
     return p_world[0], p_world[1]
 
 
+
+def print_car_speed(frame, speed, rect_coords):
+    (x, y, w, h) = rect_coords
+
+    # Set text properties
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    font_thickness = 2
+    text_color = (0, 0, 255)  # Red color in BGR
+
+    speed_text = f'{speed} km/h'
+    (text_width, text_height), baseline = cv2.getTextSize(speed_text, font, font_scale, font_thickness)
+    text_x = x + (w - text_width) // 2  # Center horizontally
+    text_y = y + text_height // 2  # Center vertically (adjust for baseline)
+
+    # Drawing box rectangle
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    # Drawing speed text
+    cv2.rectangle(frame, (x, y - 10), (x + w, y + 10), (0, 255, 0), -1)
+    cv2.putText(frame, speed_text, (text_x, text_y - 5), font, font_scale, text_color, font_thickness)
+
+
+def is_using_gpu():
+    return cv2.cuda.getCudaEnabledDeviceCount() > 0
+
+def calculate_farneback_optical_flow(
+        prev_frame,
+        frame_gray,
+        pyr_scale,
+        levels,
+        win_size,
+        iterations,
+        poly_n,
+        poly_sigma,
+        flags
+):
+
+    if is_using_gpu():
+        return farneback_optical_flow_with_gpu(
+            prev_frame,
+            frame_gray,
+            pyr_scale,
+            levels,
+            win_size,
+            iterations,
+            poly_n,
+            poly_sigma,
+            flags
+        )
+    else:
+        return cv2.calcOpticalFlowFarneback(
+            prev_frame,
+            frame_gray,
+            pyr_scale,
+            levels,
+            win_size,
+            iterations,
+            poly_n,
+            poly_sigma,
+            flags
+        )
+
+
 def farneback_optical_flow_with_gpu(
         prev_frame,
         frame_gray,
