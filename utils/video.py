@@ -78,6 +78,19 @@ def print_car_speed(frame, speed, rect_coords, max_allowed_speed):
     cv2.putText(frame, speed_text, (x, y - 5), font, font_scale, text_color, font_thickness)
 
 
+def draw_tutor_area(frame, width, upper_bound, lower_bound, alpha = .5):
+    overlay = frame.copy()
+
+    cv2.line(frame, (0, upper_bound), (width, upper_bound), (0, 0, 255), thickness=2)
+    cv2.line(frame, (0, lower_bound), (width, lower_bound), (255, 0, ), thickness=2)
+
+    cv2.rectangle(overlay, (0, upper_bound), (width, lower_bound), color=(255, 0, 255), thickness=-1)
+
+    # Blend the overlay with the original image
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+
+
 def is_using_gpu():
     return cv2.cuda.getCudaEnabledDeviceCount() > 0
 
@@ -90,10 +103,11 @@ def calculate_farneback_optical_flow(
         iterations,
         poly_n,
         poly_sigma,
-        flags
+        flags,
+        force_cpu=False
 ):
 
-    if is_using_gpu():
+    if is_using_gpu() and force_cpu is False:
         return farneback_optical_flow_with_gpu(
             prev_frame,
             frame_gray,
@@ -109,6 +123,7 @@ def calculate_farneback_optical_flow(
         return cv2.calcOpticalFlowFarneback(
             prev_frame,
             frame_gray,
+            None,
             pyr_scale,
             levels,
             win_size,

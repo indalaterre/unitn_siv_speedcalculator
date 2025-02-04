@@ -1,8 +1,8 @@
-import time
-
 import cv2
-
+import time
+import torch
 import numpy as np
+
 from sort.sort import Sort
 from ultralytics import YOLO  # For YOLOv8
 
@@ -10,6 +10,7 @@ from utils.utils import calculate_speed
 from utils.video import (process_frame,
                          map_from_homography,
                          is_using_gpu,
+                         draw_tutor_area,
                          draw_optical_flow,
                          calculate_farneback_optical_flow,
                          print_car_speed)
@@ -26,11 +27,17 @@ def select_points(event, click_x, click_y, ___, param):
 
 points = []
 
+force_cpu = False
+
 red_line_y = 470
 blue_line_y = 500
 
 # Load the model
 model = YOLO('yolov8n.pt')
+if force_cpu is True:
+    print('Forcing YOLO model to use the CPU')
+    model.to('cpu')
+
 tracker = Sort()
 
 
@@ -49,7 +56,7 @@ first_frame, prev_gray = process_frame(cap, scale=scale)
 cv2.imshow("Select Homographic Points", first_frame)
 cv2.setMouseCallback("Select Homographic Points", select_points, first_frame)
 
-if is_using_gpu():
+if is_using_gpu() and force_cpu is False:
     print('Running Farneback with GPU')
 else:
     print('Running Farneback with CPU')
@@ -88,9 +95,8 @@ speed_tutor_length_in_m = width * (abs(red_line_y - blue_line_y)) / max_distance
 offset = 6
 prev_positions = dict()  # Store car IDs and their previous positions
 
-prev_timestamp = time.time()
-
 while cap.isOpened():
+    frame_start_time = time.time()
     last_frame, last_frame_gray = process_frame(cap, scale)
 
     # Run detection
@@ -106,7 +112,8 @@ while cap.isOpened():
                                             iterations=5,
                                             poly_n=5,
                                             poly_sigma=1.2,
-                                            flags=0)
+                                            flags=0,
+                                            force_cpu=force_cpu)
 
 
     arrow_frame = last_frame.copy()
@@ -175,13 +182,13 @@ while cap.isOpened():
             speed = prev_positions[car_id]['speed']
             print_car_speed(last_frame, speed, i_box, max_allowed_speed)
 
+    frame_rate = 1 / (time.time() - frame_start_time)
+    cv2.putText(last_frame, f"FPS: {frame_rate:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    cv2.line(last_frame, (0, red_line_y_r), (width, red_line_y_r), (0, 0, 255))
-    cv2.line(last_frame, (0, blue_line_y_r), (width, blue_line_y_r), (255, 0, ))
+    draw_tutor_area(last_frame, width, red_line_y_r, blue_line_y_r)
     cv2.imshow('Speed Estimation', last_frame)
 
-    cv2.line(homographic_frame, (0, red_line_y), (homography_width, red_line_y), (0, 0, 255))
-    cv2.line(homographic_frame, (0, blue_line_y), (homography_width, blue_line_y), (255, 0,))
+    draw_tutor_area(homographic_frame, homography_width, red_line_y, blue_line_y)
     cv2.imshow('Homographic Plane', homographic_frame)
 
     cv2.imshow('OpticalFlow', arrow_frame)
