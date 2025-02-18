@@ -38,7 +38,7 @@ def map_from_homography(position, h_matrix):
     return int(p_world[0]), int(p_world[1])
 
 
-def draw_optical_flow(frame, flow):
+def draw_optical_flow(frame, flow, magnitude_threshold=2):
     h, w = flow.shape[:2]
     for y in range(0, h, 16):
         for x in range(0, w, 16):
@@ -46,7 +46,7 @@ def draw_optical_flow(frame, flow):
             magnitude = np.sqrt(fx**2 + fy**2)
 
             # Only draw if magnitude exceeds threshold
-            if magnitude > 2:
+            if magnitude > magnitude_threshold:
                 x_end = int(x + fx)
                 y_end = int(y + fy)
                 cv2.arrowedLine(

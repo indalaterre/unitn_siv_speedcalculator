@@ -1,6 +1,6 @@
 import cv2
 import time
-import torch
+import argparse
 import numpy as np
 
 from sort.sort import Sort
@@ -25,9 +25,14 @@ def select_points(event, click_x, click_y, ___, param):
             cv2.circle(frame, (int(p[0]), int(p[1])), 5, (255, 0, 0), -1)
         cv2.imshow("Select Homographic Points", frame)
 
-points = []
+parser = argparse.ArgumentParser(prog='SIV - Project')
+parser.add_argument('--fixed-fps', default=False)
+parser.add_argument('--force-cpu', default=False)
 
-force_cpu = False
+args = parser.parse_args()
+
+force_cpu = bool(args.force_cpu)
+use_fixed_fps = bool(args.fixed_fps)
 
 red_line_y = 470
 blue_line_y = 500
@@ -40,9 +45,11 @@ if force_cpu is True:
 
 tracker = Sort()
 
-
 cap = cv2.VideoCapture('video/56310-479197605.mp4')
 height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+video_delay = int(1000 // fps) if use_fixed_fps else 1
 
 scale = (.5, .5)
 height *= scale[1]
@@ -53,6 +60,7 @@ if not cap.isOpened():
 
 first_frame, prev_gray = process_frame(cap, scale=scale)
 
+points = []
 cv2.imshow("Select Homographic Points", first_frame)
 cv2.setMouseCallback("Select Homographic Points", select_points, first_frame)
 
@@ -183,7 +191,9 @@ while cap.isOpened():
             print_car_speed(last_frame, speed, i_box, max_allowed_speed)
 
     frame_rate = 1 / (time.time() - frame_start_time)
-    cv2.putText(last_frame, f"FPS: {frame_rate:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    used_frame_rate = min(frame_rate, fps) if use_fixed_fps else frame_rate
+
+    cv2.putText(last_frame, f"FPS: {used_frame_rate:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
     draw_tutor_area(last_frame, width, red_line_y_r, blue_line_y_r)
     cv2.imshow('Speed Estimation', last_frame)
@@ -196,7 +206,8 @@ while cap.isOpened():
     prev_gray = last_frame_gray
 
     # Break the loop if 'q' key is pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    used_vide_delay = video_delay if frame_rate >= fps and used_frame_rate else 1
+    if cv2.waitKey(used_vide_delay) & 0xFF == ord('q'):
         break
 
 cap.release()
